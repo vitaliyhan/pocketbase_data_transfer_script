@@ -69,17 +69,18 @@ async function transferData() {
         // Transfer records
         console.log('Starting record transfer...');
         let transferredCount = 0;
-
+        let i = 0;
         for (const record of records) {
+            i++;
             // Remove id and other PocketBase-specific fields that shouldn't be copied
-            const { id, collectionId, collectionName, created, updated, ...data } = record;
+            const { collectionId, collectionName, created, updated, ...data } = record;
 
             try {
                 await recipientClient.collection(config.collectionName).create(data);
                 transferredCount++;
-                console.log(`Transferred record: ${id}`);
+                console.log(`Transferred record: ${i}`);
             } catch (error) {
-                console.error(`Failed to transfer record ${id}:`, error.message);
+                console.error(`Failed to transfer record ${i}:`, error.message);
             }
         }
 
