@@ -27,6 +27,13 @@ npm install pocketbase dotenv
 ```
 
 ## Configuration
+
+// Configure file fields (update to match your collection schema)
+const fileFields = {
+    'image': 'single',
+    'additional_image': 'multiple',
+};
+
 Create a .env file in the same directory with the following variables:
 .env
 
