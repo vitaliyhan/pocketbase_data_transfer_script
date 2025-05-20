@@ -1,6 +1,8 @@
 {
   "dependencies": {
     "dotenv": "^16.5.0",
+    "form-data": "^4.0.2",
+    "node-fetch": "^3.3.2",
     "pocketbase": "^0.26.0"
   }
 }
