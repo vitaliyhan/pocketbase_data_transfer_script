@@ -34,6 +34,9 @@ const fileFields = {
     'additional_image': 'multiple',
 };
 
+COLLECTIONS_WITH_PARENTS_ITSSELF - of you have collections with parents itself, you need to specify them in the array.
+
+
 Create a .env file in the same directory with the following variables:
 .env
 
@@ -50,7 +53,8 @@ RECIPIENT_SUPERUSER_EMAIL=admin@example.com
 RECIPIENT_SUPERUSER_PASSWORD=yourpassword
 
 # Collection to transfer (default: statuses)
-COLLECTION_NAME=statuses
+COLLECTION_NAMES = ["categories", "attribute_type", "attributes", "products", "product_attributes", "product_components", "statuses","order_status"]
+COLLECTIONS_WITH_PARENTS_ITSSELF = ["categories"]
 ```
 
 ## Usage

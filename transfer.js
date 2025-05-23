@@ -22,9 +22,9 @@ const config = {
         email: process.env.RECIPIENT_SUPERUSER_EMAIL,
         password: process.env.RECIPIENT_SUPERUSER_PASSWORD,
     },
-    collectionName: process.env.COLLECTION_NAME || 'products',
+    collectionNames: process.env.COLLECTION_NAMES ? JSON.parse(process.env.COLLECTION_NAMES) : null,
     tempDir: process.env.TEMP_DIR || './temp_files',
-    batchSize: process.env.BATCH_SIZE ? parseInt(process.env.BATCH_SIZE) : 10,
+    batchSize: process.env.BATCH_SIZE ? parseInt(process.env.BATCH_SIZE) : 100,
     timeout: process.env.TIMEOUT ? parseInt(process.env.TIMEOUT) : 30000,
 };
 
@@ -266,23 +266,23 @@ async function uploadFiles(client, collectionName, recordId, fieldName, files) {
 /**
  * Clear all records from the recipient collection
  */
-async function clearRecipientCollection(client) {
+async function clearRecipientCollection(client, collectionName) {
     try {
-        console.log(`[CLEANUP] Starting to clear recipient collection`);
-        const existingRecords = await client.collection(config.collectionName).getFullList();
+        console.log(`[CLEANUP] Starting to clear recipient collection ${collectionName}`);
+        const existingRecords = await client.collection(collectionName).getFullList();
         console.log(`[CLEANUP] Found ${existingRecords.length} records to delete`);
 
         for (const record of existingRecords) {
             try {
-                await client.collection(config.collectionName).delete(record.id);
+                await client.collection(collectionName).delete(record.id);
                 console.log(`[CLEANUP] Deleted record ${record.id}`);
             } catch (error) {
                 console.error(`[CLEANUP ERROR] Failed to delete record ${record.id}:`, error.message);
             }
         }
-        console.log(`[CLEANUP] Completed clearing recipient collection`);
+        console.log(`[CLEANUP] Completed clearing recipient collection ${collectionName}`);
     } catch (error) {
-        console.error('[CLEANUP ERROR] Failed to clear recipient collection:', error.message);
+        console.error(`[CLEANUP ERROR] Failed to clear recipient collection ${collectionName}:`, error.message);
         throw error;
     }
 }
@@ -290,11 +290,12 @@ async function clearRecipientCollection(client) {
 /**
  * Main data transfer function
  */
+/**
+ * Main data transfer function
+ */
 async function transferData() {
     let donorClient;
     let recipientClient;
-    let transferredCount = 0;
-    let failedCount = 0;
 
     console.log('[TRANSFER] Starting data transfer process');
 
@@ -308,9 +309,10 @@ async function transferData() {
             throw new Error('Missing recipient PocketBase configuration');
         }
 
-        console.log(`[TRANSFER] Collection: ${config.collectionName}`);
+        console.log(`[TRANSFER] Collections: ${config.collectionNames.join(', ')}`);
         console.log(`[TRANSFER] Donor: ${config.donor.url}`);
         console.log(`[TRANSFER] Recipient: ${config.recipient.url}`);
+        console.log(`[TRANSFER] Universal file fields: ${JSON.stringify(fileFields)}`);
 
         // Initialize PocketBase clients
         console.log('[CLIENT] Initializing PocketBase clients');
@@ -324,157 +326,340 @@ async function transferData() {
         await recipientClient.admins.authWithPassword(config.recipient.email, config.recipient.password);
         console.log('[AUTH] Authentication successful');
 
-        // Clear recipient collection
-        await clearRecipientCollection(recipientClient);
+        // Process each collection in order
+        for (const collectionName of config.collectionNames) {
+            console.log(`\n[COLLECTION] Starting transfer for collection: ${collectionName}`);
 
-        // Get all records from donor
-        console.log('[FETCH] Retrieving records from donor');
-        const records = await donorClient.collection(config.collectionName).getFullList({
-            sort: 'created',
-            batch: config.batchSize,
-        });
+            const isCategoryCollection = process.env.COLLECTIONS_WITH_PARENTS_ITSSELF.includes(collectionName.toLowerCase());
 
-        if (records.length === 0) {
-            console.log('[FETCH] No records found in donor collection');
-            return;
-        }
+            // 
+            if (isCategoryCollection) {
+                await transferCategories(donorClient, recipientClient, collectionName);
+            } else {
 
-        console.log(`[FETCH] Found ${records.length} records to transfer`);
+                let transferredCount = 0;
+                let failedCount = 0;
 
-        // Transfer records in batches
-        for (let i = 0; i < records.length; i += config.batchSize) {
-            const batch = records.slice(i, i + config.batchSize);
-            console.log(`[BATCH] Processing batch ${Math.floor(i / config.batchSize) + 1} (records ${i + 1}-${Math.min(i + config.batchSize, records.length)})`);
+                // Clear recipient collection
+                await clearRecipientCollection(recipientClient, collectionName);
 
-            for (const record of batch) {
-                console.log(`[RECORD] Processing record ${record.id}`);
-                try {
-                    const { collectionId, collectionName, created, updated, expand, additional_image, image, ...data } = record;
+                // Get all records from donor
+                console.log('[FETCH] Retrieving records from donor');
+                const records = await donorClient.collection(collectionName).getFullList({
+                    sort: 'created',
+                    batch: config.batchSize,
+                });
 
-                    // Create new record on recipient
-                    console.log(`[RECORD] Creating record in recipient`);
-                    const newRecord = await recipientClient.collection(config.collectionName).create(data);
-                    console.log(`[RECORD] Created new record ${newRecord.id}`);
+                if (records.length === 0) {
+                    console.log('[FETCH] No records found in donor collection');
+                    continue;
+                }
 
-                    // Process each file field
-                    for (const [field, type] of Object.entries(fileFields)) {
-                        if (record[field]) {
-                            console.log(`[FILE FIELD] Processing ${field} (${type})`);
-                            try {
-                                if (type === 'multiple' && Array.isArray(record[field])) {
-                                    console.log(`[FILE FIELD] Processing multiple files (${record[field].length})`);
-                                    const filePaths = [];
-                                    for (const filename of record[field]) {
-                                        console.log(`[FILE DOWNLOAD] Starting download for ${filename}`);
-                                        const filePath = await downloadFile(
-                                            donorClient,
-                                            config.collectionName,
-                                            record.id,
-                                            filename
-                                        );
-                                        if (filePath) {
-                                            console.log(`[FILE DOWNLOAD] Successfully downloaded to ${filePath}`);
-                                            filePaths.push(filePath);
-                                        } else {
-                                            console.error(`[FILE DOWNLOAD] Failed to download ${filename}`);
-                                        }
-                                    }
+                console.log(`[FETCH] Found ${records.length} records to transfer`);
 
-                                    if (filePaths.length > 0) {
-                                        console.log(`[FILE UPLOAD] Starting upload of ${filePaths.length} files`);
-                                        await uploadFiles(
-                                            recipientClient,
-                                            config.collectionName,
-                                            newRecord.id,
-                                            field,
-                                            filePaths
-                                        );
-                                        console.log(`[FILE UPLOAD] Completed upload`);
-                                    }
+                // Transfer records in batches
+                for (let i = 0; i < records.length; i += config.batchSize) {
+                    const batch = records.slice(i, i + config.batchSize);
+                    console.log(`[BATCH] Processing batch ${Math.floor(i / config.batchSize) + 1} (records ${i + 1}-${Math.min(i + config.batchSize, records.length)})`);
 
-                                    // Cleanup temp files
-                                    filePaths.forEach(filePath => {
-                                        try {
-                                            if (fs.existsSync(filePath)) {
-                                                fs.unlinkSync(filePath);
-                                                console.log(`[CLEANUP] Removed temp file ${filePath}`);
+                    for (const record of batch) {
+                        console.log(`[RECORD] Processing record ${record.id}`);
+                        try {
+                            const { collectionId, collectionName, created, updated, expand,image, additional_image, ...data } = record;
+
+                            // Create new record on recipient
+                            console.log(`[RECORD] Creating record in recipient`);
+                            const newRecord = await recipientClient.collection(collectionName).create(data);
+                            console.log(`[RECORD] Created new record ${newRecord.id}`);
+
+                            // Process each file field (using universal fileFields)
+                            for (const [field, type] of Object.entries(fileFields)) {
+                                if (record[field]) {
+                                    console.log(`[FILE FIELD] Processing ${field} (${type})`);
+                                    try {
+                                        if (type === 'multiple' && Array.isArray(record[field])) {
+                                            console.log(`[FILE FIELD] Processing multiple files (${record[field].length})`);
+                                            const filePaths = [];
+                                            for (const filename of record[field]) {
+                                                console.log(`[FILE DOWNLOAD] Starting download for ${filename}`);
+                                                const filePath = await downloadFile(
+                                                    donorClient,
+                                                    collectionName,
+                                                    record.id,
+                                                    filename
+                                                );
+                                                if (filePath) {
+                                                    console.log(`[FILE DOWNLOAD] Successfully downloaded to ${filePath}`);
+                                                    filePaths.push(filePath);
+                                                } else {
+                                                    console.error(`[FILE DOWNLOAD] Failed to download ${filename}`);
+                                                }
                                             }
-                                        } catch (err) {
-                                            console.error(`[CLEANUP ERROR] Failed to remove ${filePath}:`, err.message);
-                                        }
-                                    });
-                                } else if (type === 'single') {
-                                    const filename = record[field];
-                                    console.log(`[FILE DOWNLOAD] Starting single file download for ${filename}`);
-                                    const filePath = await downloadFile(
-                                        donorClient,
-                                        config.collectionName,
-                                        record.id,
-                                        filename
-                                    );
 
-                                    if (filePath) {
-                                        console.log(`[FILE UPLOAD] Starting single file upload`);
-                                        await uploadFiles(
-                                            recipientClient,
-                                            config.collectionName,
-                                            newRecord.id,
-                                            field,
-                                            filePath
-                                        );
-                                        console.log(`[FILE UPLOAD] Completed upload`);
-
-                                        try {
-                                            if (fs.existsSync(filePath)) {
-                                                fs.unlinkSync(filePath);
-                                                console.log(`[CLEANUP] Removed temp file ${filePath}`);
+                                            if (filePaths.length > 0) {
+                                                console.log(`[FILE UPLOAD] Starting upload of ${filePaths.length} files`);
+                                                await uploadFiles(
+                                                    recipientClient,
+                                                    collectionName,
+                                                    newRecord.id,
+                                                    field,
+                                                    filePaths
+                                                );
+                                                console.log(`[FILE UPLOAD] Completed upload`);
                                             }
-                                        } catch (err) {
-                                            console.error(`[CLEANUP ERROR] Failed to remove ${filePath}:`, err.message);
+
+                                            // Cleanup temp files
+                                            filePaths.forEach(filePath => {
+                                                try {
+                                                    if (fs.existsSync(filePath)) {
+                                                        fs.unlinkSync(filePath);
+                                                        console.log(`[CLEANUP] Removed temp file ${filePath}`);
+                                                    }
+                                                } catch (err) {
+                                                    console.error(`[CLEANUP ERROR] Failed to remove ${filePath}:`, err.message);
+                                                }
+                                            });
+                                        } else if (type === 'single') {
+                                            const filename = record[field];
+                                            console.log(`[FILE DOWNLOAD] Starting single file download for ${filename}`);
+                                            const filePath = await downloadFile(
+                                                donorClient,
+                                                collectionName,
+                                                record.id,
+                                                filename
+                                            );
+
+                                            if (filePath) {
+                                                console.log(`[FILE UPLOAD] Starting single file upload`);
+                                                await uploadFiles(
+                                                    recipientClient,
+                                                    collectionName,
+                                                    newRecord.id,
+                                                    field,
+                                                    filePath
+                                                );
+                                                console.log(`[FILE UPLOAD] Completed upload`);
+
+                                                try {
+                                                    if (fs.existsSync(filePath)) {
+                                                        fs.unlinkSync(filePath);
+                                                        console.log(`[CLEANUP] Removed temp file ${filePath}`);
+                                                    }
+                                                } catch (err) {
+                                                    console.error(`[CLEANUP ERROR] Failed to remove ${filePath}:`, err.message);
+                                                }
+                                            }
                                         }
+                                    } catch (error) {
+                                        console.error(`[FILE PROCESSING ERROR] Field ${field} for record ${record.id}:`, error.message);
                                     }
                                 }
-                            } catch (error) {
-                                console.error(`[FILE PROCESSING ERROR] Field ${field} for record ${record.id}:`, error.message);
                             }
+
+                            transferredCount++;
+                            console.log(`[SUCCESS] Transferred record ${record.id} (${transferredCount}/${records.length})`);
+                        } catch (error) {
+                            failedCount++;
+                            console.error(`[FAILURE] Record ${record.id} failed:`, error.message);
+                            console.error(`[ERROR DETAILS]`, error);
                         }
                     }
-
-                    transferredCount++;
-                    console.log(`[SUCCESS] Transferred record ${record.id} (${transferredCount}/${records.length})`);
-                } catch (error) {
-                    failedCount++;
-                    console.error(`[FAILURE] Record ${record.id} failed:`, error.message);
-                    console.error(`[ERROR DETAILS]`, error);
                 }
+
+                console.log(`\n[COLLECTION COMPLETE] Summary for ${collectionName}:`);
+                console.log(`- Successfully transferred: ${transferredCount}`);
+                console.log(`- Failed transfers: ${failedCount}`);
+                console.log(`- Total records processed: ${records.length}`);
             }
         }
 
-        console.log('\n[TRANSFER COMPLETE] Summary:');
-        console.log(`- Successfully transferred: ${transferredCount}`);
-        console.log(`- Failed transfers: ${failedCount}`);
-        console.log(`- Total records processed: ${records.length}`);
+        console.log('\n[ALL COLLECTIONS TRANSFER COMPLETE]');
     } catch (error) {
         console.error('[FATAL ERROR] Data transfer failed:', error.message);
         console.error('[FATAL ERROR DETAILS]', error);
         process.exit(1);
-    } finally {
-        // Clean up temp directory
-        try {
-            // console.log('[CLEANUP] Starting final cleanup');
-            // const files = fs.readdirSync(tempDir);
-            // if (files.length > 0) {
-            //     console.log(`[CLEANUP] Found ${files.length} files in temp directory`);
-            //     for (const file of files) {
-            //         const filePath = path.join(tempDir, file);
-            //         fs.unlinkSync(filePath);
-            //     }
-            // }
-            // console.log('[CLEANUP] Completed final cleanup');
-        } catch (error) {
-            console.error('[CLEANUP ERROR] Failed to clean temp directory:', error.message);
+    }
+}
+
+/**
+ * Special handling for category collections with parent relationships
+ */
+async function transferCategories(donorClient, recipientClient, collectionName) {
+    console.log(`\n[CATEGORIES] Starting special transfer for collection: ${collectionName}`);
+
+    let transferredCount = 0;
+    let failedCount = 0;
+
+    // Clear recipient collection
+    await clearRecipientCollection(recipientClient, collectionName);
+
+    // Get all records from donor
+    console.log('[FETCH] Retrieving category records from donor');
+    const records = await donorClient.collection(collectionName).getFullList({
+        sort: 'created',
+        batch: config.batchSize,
+    });
+
+    if (records.length === 0) {
+        console.log('[FETCH] No category records found in donor collection');
+        return;
+    }
+
+    console.log(`[FETCH] Found ${records.length} category records to transfer`);
+
+    // PHASE 1: Transfer all categories without parent relationships
+    console.log('[PHASE 1] Transferring categories without parent relationships');
+    const idMap = new Map(); // Map from donor ID to recipient ID
+
+    for (let i = 0; i < records.length; i += config.batchSize) {
+        const batch = records.slice(i, i + config.batchSize);
+        console.log(`[BATCH] Processing batch ${Math.floor(i / config.batchSize) + 1} (records ${i + 1}-${Math.min(i + config.batchSize, records.length)})`);
+
+        for (const record of batch) {
+            console.log(`[RECORD] Processing category ${record.id}`);
+            try {
+                // Create a copy of the data without the parent field
+                const { collectionId, collectionName, created, updated, expand, parent, image, additional_image, ...data } = record;
+
+                // Create new record in recipient
+                console.log(`[RECORD] Creating category in recipient (without parent)`);
+                const newRecord = await recipientClient.collection(collectionName).create(data);
+                console.log(`[RECORD] Created new category ${newRecord.id}`);
+
+                // Store the ID mapping
+                idMap.set(record.id, newRecord.id);
+
+                // Process file fields if any (same as before)
+                for (const [field, type] of Object.entries(fileFields)) {
+                    if (record[field]) {
+                        console.log(`[FILE FIELD] Processing ${field} (${type})`);
+                        try {
+                            if (type === 'multiple' && Array.isArray(record[field])) {
+                                console.log(`[FILE FIELD] Processing multiple files (${record[field].length})`);
+                                const filePaths = [];
+                                for (const filename of record[field]) {
+                                    console.log(`[FILE DOWNLOAD] Starting download for ${filename}`);
+                                    const filePath = await downloadFile(
+                                        donorClient,
+                                        collectionName,
+                                        record.id,
+                                        filename
+                                    );
+                                    if (filePath) {
+                                        console.log(`[FILE DOWNLOAD] Successfully downloaded to ${filePath}`);
+                                        filePaths.push(filePath);
+                                    } else {
+                                        console.error(`[FILE DOWNLOAD] Failed to download ${filename}`);
+                                    }
+                                }
+
+                                if (filePaths.length > 0) {
+                                    console.log(`[FILE UPLOAD] Starting upload of ${filePaths.length} files`);
+                                    await uploadFiles(
+                                        recipientClient,
+                                        collectionName,
+                                        newRecord.id,
+                                        field,
+                                        filePaths
+                                    );
+                                    console.log(`[FILE UPLOAD] Completed upload`);
+                                }
+
+                                // Cleanup temp files
+                                filePaths.forEach(filePath => {
+                                    try {
+                                        if (fs.existsSync(filePath)) {
+                                            fs.unlinkSync(filePath);
+                                            console.log(`[CLEANUP] Removed temp file ${filePath}`);
+                                        }
+                                    } catch (err) {
+                                        console.error(`[CLEANUP ERROR] Failed to remove ${filePath}:`, err.message);
+                                    }
+                                });
+                            } else if (type === 'single') {
+                                const filename = record[field];
+                                console.log(`[FILE DOWNLOAD] Starting single file download for ${filename}`);
+                                const filePath = await downloadFile(
+                                    donorClient,
+                                    collectionName,
+                                    record.id,
+                                    filename
+                                );
+
+                                if (filePath) {
+                                    console.log(`[FILE UPLOAD] Starting single file upload`);
+                                    await uploadFiles(
+                                        recipientClient,
+                                        collectionName,
+                                        newRecord.id,
+                                        field,
+                                        filePath
+                                    );
+                                    console.log(`[FILE UPLOAD] Completed upload`);
+
+                                    try {
+                                        if (fs.existsSync(filePath)) {
+                                            fs.unlinkSync(filePath);
+                                            console.log(`[CLEANUP] Removed temp file ${filePath}`);
+                                        }
+                                    } catch (err) {
+                                        console.error(`[CLEANUP ERROR] Failed to remove ${filePath}:`, err.message);
+                                    }
+                                }
+                            }
+                        } catch (error) {
+                            console.error(`[FILE PROCESSING ERROR] Field ${field} for record ${record.id}:`, error.message);
+                        }
+                    }
+                }
+
+                transferredCount++;
+                console.log(`[SUCCESS] Transferred category ${record.id} (${transferredCount}/${records.length})`);
+            } catch (error) {
+                failedCount++;
+                console.error(`[FAILURE] Category ${record.id} failed:`, error.message);
+                console.error(`[ERROR DETAILS]`, error);
+            }
         }
     }
+
+    // PHASE 2: Update parent relationships
+    console.log('[PHASE 2] Updating parent relationships');
+    let parentUpdatesCount = 0;
+
+    for (const record of records) {
+        if (record.parent) {
+            console.log(`[PARENT] Processing parent relationship for ${record.id}`);
+            try {
+                // Get the corresponding new ID in recipient
+                const newId = idMap.get(record.id);
+                const newParentId = idMap.get(record.parent);
+
+                if (!newId || !newParentId) {
+                    console.error(`[PARENT ERROR] Missing ID mapping for ${record.id} or its parent ${record.parent}`);
+                    continue;
+                }
+
+                // Update the record to set the parent
+                console.log(`[PARENT] Setting parent ${newParentId} for category ${newId}`);
+                await recipientClient.collection(collectionName).update(newId, {
+                    parent: newParentId
+                });
+
+                parentUpdatesCount++;
+                console.log(`[PARENT SUCCESS] Updated parent for ${newId}`);
+            } catch (error) {
+                console.error(`[PARENT ERROR] Failed to update parent for ${record.id}:`, error.message);
+                console.error(`[ERROR DETAILS]`, error);
+            }
+        }
+    }
+
+    console.log(`\n[CATEGORIES COMPLETE] Summary for ${collectionName}:`);
+    console.log(`- Successfully transferred: ${transferredCount}`);
+    console.log(`- Parent relationships updated: ${parentUpdatesCount}`);
+    console.log(`- Failed transfers: ${failedCount}`);
+    console.log(`- Total records processed: ${records.length}`);
 }
 
 // Start the transfer
