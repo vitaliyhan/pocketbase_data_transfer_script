@@ -58,6 +58,7 @@ try {
 const fileFields = {
     'image': 'single',
     'additional_image': 'multiple',
+    'instruction': 'multiple',
 };
 
 /**
@@ -365,7 +366,7 @@ async function transferData() {
                     for (const record of batch) {
                         console.log(`[RECORD] Processing record ${record.id}`);
                         try {
-                            const { collectionId, collectionName, created, updated, expand,image, additional_image, ...data } = record;
+                            const { collectionId, collectionName, created, updated, expand, image, additional_image, instruction, ...data } = record;
 
                             // Create new record on recipient
                             console.log(`[RECORD] Creating record in recipient`);
@@ -519,7 +520,7 @@ async function transferCategories(donorClient, recipientClient, collectionName) 
             console.log(`[RECORD] Processing category ${record.id}`);
             try {
                 // Create a copy of the data without the parent field
-                const { collectionId, collectionName, created, updated, expand, parent, image, additional_image, ...data } = record;
+                const { collectionId, collectionName, created, updated, expand, parent, image, additional_image, instruction, ...data } = record;
 
                 // Create new record in recipient
                 console.log(`[RECORD] Creating category in recipient (without parent)`);
